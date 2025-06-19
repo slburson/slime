@@ -10,6 +10,13 @@
 ;;; separately for each Lisp. Each is declared as a generic function
 ;;; for which swank-<implementation>.lisp provides methods.
 
+(in-package swank)
+
+;;; Forward references
+(defvar *communication-style*)
+(defvar *swank-debugger-condition* nil
+  "The condition being debugged.")
+
 (in-package swank/backend)
 
 
@@ -477,10 +484,6 @@ This is used to resolve filenames without directory component."
   "Call FN with hooks to handle special syntax."
   (funcall fn))
 
-(definterface default-readtable-alist ()
-  "Return a suitable initial value for SWANK:*READTABLE-ALIST*."
-  '())
-
 
 ;;;; Packages
 
@@ -653,9 +656,8 @@ The stream calls READ-STRING when input is needed.")
          :name "auto-flush-thread"))
 
 (definterface really-finish-output (stream)
-  "Make an auto-flush thread"
-  (spawn (lambda () (auto-flush-loop stream *auto-flush-interval* nil))
-         :name "auto-flush-thread"))
+  "FINISH-OUTPUT or more"
+  (finish-output stream))
 
 
 ;;;; Documentation
@@ -937,7 +939,11 @@ relatively to the frame associated to FRAME-NUMBER.")
 (definterface disassemble-frame (frame-number)
   "Disassemble the code for the FRAME-NUMBER.
 The output should be written to standard output.
-FRAME-NUMBER is a non-negative integer.")
+FRAME-NUMBER is a non-negative integer."
+  (disassemble (frame-function frame-number)))
+
+(definterface frame-function (frame-number)
+  "Return the frame function.")
 
 (definterface eval-in-frame (form frame-number)
    "Evaluate a Lisp form in the lexical context of a stack frame
@@ -1218,16 +1224,6 @@ inserted into the buffer as is, or a list of the form:
  after calling the lambda.
 "))
 
-(defmethod emacs-inspect ((object t))
-  "Generic method for inspecting any kind of object.
-
-Since we don't know how to deal with OBJECT we simply dump the
-output of CL:DESCRIBE."
-   `("Type: " (:value ,(type-of object)) (:newline)
-     "Don't know how to inspect the object, dumping output of CL:DESCRIBE:"
-     (:newline) (:newline)
-     ,(with-output-to-string (desc) (describe object desc))))
-
 (definterface eval-context (object)
   "Return a list of bindings corresponding to OBJECT's slots."
   (declare (ignore object))
@@ -1360,6 +1356,49 @@ created thread.  This function sets the form which is used to produce
 the initial value."
   (set var (eval form)))
 
+
+;;;; Interrupt handling 
+
+;; Usually we'd like to enter the debugger when an interrupt happens.
+;; But for some operations, in particular send&receive, it's crucial
+;; that those are not interrupted when the mailbox is in an
+;; inconsistent/locked state. Obviously, if send&receive don't work we
+;; can't communicate and the debugger will not work.  To solve that
+;; problem, we try to handle interrupts only at certain safe-points.
+;;
+;; Whenever an interrupt happens we call the function
+;; INVOKE-OR-QUEUE-INTERRUPT.  Usually this simply invokes the
+;; debugger, but if interrupts are disabled the interrupt is put in a
+;; queue for later processing.  At safe-points, we call
+;; CHECK-SLIME-INTERRUPTS which looks at the queue and invokes the
+;; debugger if needed.
+;;
+;; The queue for interrupts is stored in a thread local variable.
+;; WITH-CONNECTION sets it up.  WITH-SLIME-INTERRUPTS allows
+;; interrupts, i.e. the debugger is entered immediately.  When we call
+;; "user code" or non-problematic code we allow interrupts.  When
+;; inside WITHOUT-SLIME-INTERRUPTS, interrupts are queued.  When we
+;; switch from "user code" to more delicate operations we need to
+;; disable interrupts.  In particular, interrupts should be disabled
+;; for SEND and RECEIVE-IF.
+
+;; If true execute interrupts, otherwise queue them.
+;; Note: `with-connection' binds *pending-slime-interrupts*.
+(defvar *slime-interrupts-enabled*)
+
+(defmacro with-interrupts-enabled% (flag body)
+  `(progn
+     ,@(if flag '((check-slime-interrupts)))
+     (multiple-value-prog1
+         (let ((*slime-interrupts-enabled* ,flag))
+           ,@body)
+       ,@(if flag '((check-slime-interrupts))))))
+
+(defmacro with-slime-interrupts (&body body)
+  `(with-interrupts-enabled% t ,body))
+
+(defmacro without-slime-interrupts (&body body)
+  `(with-interrupts-enabled% nil ,body))
 ;; List of delayed interrupts.
 ;; This should only have thread-local bindings, so no init form.
 (defvar *pending-slime-interrupts*)
@@ -1593,3 +1632,13 @@ Implementations intercept calls to SPEC and call, in this order:
 (definterface augment-features ()
   "*features* or something else "
   *features*)
+
+(definterface structure-accessor-p (symbol)
+  "Does SYMBOL name a structure accessor?"
+  (declare (ignore symbol))
+  nil)
+
+(definterface call-with-interrupt-handler (interrupt-handler function)
+  "Handle interrupts"
+  (declare (ignore interrupt-handler))
+  (funcall function))

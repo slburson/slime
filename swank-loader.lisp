@@ -256,7 +256,7 @@ If LOAD is true, load the fasl file."
   '(swank-util swank-repl
     swank-c-p-c swank-arglists swank-fuzzy
     swank-fancy-inspector
-    swank-presentations swank-presentation-streams
+    swank-presentations
     #+(or asdf2 asdf3 sbcl ecl) swank-asdf
     swank-package-fu
     swank-hyperdoc
@@ -264,7 +264,8 @@ If LOAD is true, load the fasl file."
     swank-mrepl
     swank-trace-dialog
     swank-macrostep
-    swank-quicklisp)
+    swank-quicklisp
+    swank-indentation)
   "List of names for contrib modules.")
 
 (defun append-dir (absolute name)
@@ -357,8 +358,8 @@ global variabes in SWANK."
   (when setup
     (setup)))
 
-(defun dump-image (filename)
-  (init :setup nil)
+(defun dump-image (filename &key load-contribs)
+  (init :setup nil :load-contribs load-contribs)
   (funcall (q "swank/backend:save-image") filename))
 
 (defun list-fasls (&key (include-contribs t) (compile t)

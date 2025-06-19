@@ -168,8 +168,8 @@ For other contexts we return the symbol at point."
            (backward-up-list 1)
            (slime-parse-context `(setf ,name)))
           ((slime-in-expression-p '(defmethod *))
-           (unless (looking-at "\\s ")
-             (forward-sexp 1)) ; skip over the methodname
+           (slime-beginning-of-list)
+           (forward-sexp 2)
            (let (qualifiers arglist)
              (cl-loop for e = (read (current-buffer))
                       until (listp e) do (push e qualifiers)
@@ -212,6 +212,12 @@ For other contexts we return the symbol at point."
           (t
            name))))
 
+(defun slime-symbols-match-p (a b)
+  (and (symbolp a)
+       (symbolp b)
+       (eq (compare-strings (symbol-name a) 0 nil
+                            (symbol-name b) 0 nil t)
+           t)))
 
 (defun slime-in-expression-p (pattern)
   "A helper function to determine the current context.
@@ -229,10 +235,7 @@ The pattern can have the form:
                         (cl-etypecase p
                           (symbol (slime-beginning-of-list)
                                   (let ((x (read (current-buffer))))
-                                    (and (symbolp x)
-                                         (eq (compare-strings (symbol-name x) 0 nil
-                                                              (symbol-name p) 0 nil t)
-                                             t))))
+                                    (slime-symbols-match-p x p)))
                           (number (backward-up-list p)
                                   t)))))))
 
@@ -287,7 +290,8 @@ Point is placed before the first expression in the list."
 
 (defun slime-arglist-specializers (arglist)
   (cond ((or (null arglist)
-	     (member (cl-first arglist) '(&optional &key &rest &aux)))
+	     (cl-member (cl-first arglist) '(&optional &key &rest &aux) 
+                        :test #'slime-symbols-match-p))
 	 (list))
 	((consp (cl-first arglist))
 	 (cons (cl-second (cl-first arglist))
