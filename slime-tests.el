@@ -259,8 +259,6 @@ conditions (assertions)."
                            (slime-symbol-at-point)
                            #'equal)))))
 
-
-
 (def-slime-test symbol-at-point.2 (sym)
   "fancy symbol-name _not_ at BOB/EOB"
   slime-test-symbols
@@ -336,9 +334,8 @@ conditions (assertions)."
   slime-test-symbols
   (slime-check-symbol-at-point "#+" sym ""))
 
-
 (def-slime-test sexp-at-point.1 (string)
-  "symbol-at-point after #'"
+  "sexp-at-point after noise"
   '(("foo")
     ("#:foo")
     ("#'foo")
@@ -353,6 +350,29 @@ conditions (assertions)."
                        string
                        (slime-sexp-at-point)
                        #'equal)))
+
+(def-slime-test sexp-at-point.2 (string)
+  "sexp-at-point top comment"
+  '((";\n")
+    ("; x\n")
+    (" ;\n")
+    (" ; x\n")
+    ("\n;\n")
+    ("\n; x\n"))
+  (with-temp-buffer
+    (lisp-mode)
+    (insert string)
+    (slime-test-expect (format "Check sexp `%s' (at %d)..."
+                               (buffer-string) (point))
+                       nil
+                       (slime-sexp-at-point)
+                       #'eq)
+    (goto-char (point-min))
+    (slime-test-expect (format "Check sexp `%s' (at %d)..."
+                               (buffer-string) (point))
+                       nil
+                       (slime-sexp-at-point)
+                       #'eq)))
 
 (def-slime-test narrowing ()
     "Check that narrowing is properly sustained."
@@ -1294,7 +1314,7 @@ This test will fail more likely before dispatch caches are warmed up."
                                              :dont-close nil)))))
            (slime-sync-to-top-level 3)
            (slime-disconnect)
-           (slime-test-expect "Number of connections must remane the same"
+           (slime-test-expect "Number of connections must remain the same"
                               connection-count
                               (length slime-net-processes)))
       (slime-select-connection old-connection))))
@@ -1327,6 +1347,26 @@ Reconnect afterwards."
                             (lambda ()
                               (not (member hook slime-connected-hook)))
                             5))))
+
+(def-slime-test slime-modeline-string-test
+  (expected current-connection buffer-connection
+   connection-name current-package modeline-state-string)
+  "slime-modeline-string returns string in proper format."
+  '((" Slime" nil nil nil nil nil)
+    (" {sbcl local-conn-1 state}" 'mocked-conn 'mocked-local-conn
+     "local-conn-1" "sbcl" " state")
+    (" [sbcl conn-1 state]" 'mocked-conn nil "conn-1" "sbcl" " state"))
+  (with-temp-buffer
+    (lisp-mode)
+    (slime-check ("slime-modeline-string returns \"%s\"" expected)
+      (cl-letf (((symbol-function 'slime-current-connection)
+		 (lambda () (or buffer-connection current-connection)))
+		((symbol-function 'slime-connection-name) (lambda (_) connection-name))
+		((symbol-function 'slime-current-package) (lambda () current-package))
+		((symbol-function 'slime-modeline-state-string)
+                 (lambda (_) modeline-state-string)))
+	(setq slime-buffer-connection buffer-connection)
+	(equal expected (slime-modeline-string))))))
 
 
 ;;;; SLIME-loading tests that launch separate Emacsen

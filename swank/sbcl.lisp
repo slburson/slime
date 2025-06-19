@@ -253,7 +253,7 @@
 (progn
   (defun input-ready-p (stream)
     (or (not (fd-stream-input-buffer-empty-p stream))
-        (handle-listen (sockint::fd->handle (sb-impl::fd-stream-fd stream)))))
+        (handle-listen (sb-impl::fd-stream-fd stream))))
 
   (sb-alien:define-alien-routine ("WSACreateEvent" wsa-create-event)
       sb-win32:handle)
@@ -355,98 +355,24 @@
           (sb-bsd-sockets:interrupted-error ()))))
 
 
-;;;; Support for SBCL syntax
-
-;;; SBCL's source code is riddled with #! reader macros.  Also symbols
-;;; containing `!' have special meaning.  We have to work long and
-;;; hard to be able to read the source.  To deal with #! reader
-;;; macros, we use a special readtable.  The special symbols are
-;;; converted by a condition handler.
-
-(defun feature-in-list-p (feature list)
-  (etypecase feature
-    (symbol (member feature list :test #'eq))
-    (cons (flet ((subfeature-in-list-p (subfeature)
-                   (feature-in-list-p subfeature list)))
-            ;; Don't use ECASE since SBCL also has :host-feature,
-            ;; don't need to handle it or anything else appearing in
-            ;; the future or in erronous code.
-            (case (first feature)
-              (:or  (some  #'subfeature-in-list-p (rest feature)))
-              (:and (every #'subfeature-in-list-p (rest feature)))
-              (:not (destructuring-bind (e) (cdr feature)
-                      (not (subfeature-in-list-p e)))))))))
-
-(defun shebang-reader (stream sub-character infix-parameter)
-  (declare (ignore sub-character))
-  (when infix-parameter
-    (error "illegal read syntax: #~D!" infix-parameter))
-  (let ((next-char (read-char stream)))
-    (unless (find next-char "+-")
-      (error "illegal read syntax: #!~C" next-char))
-    ;; When test is not satisfied
-    ;; FIXME: clearer if order of NOT-P and (NOT NOT-P) were reversed? then
-    ;; would become "unless test is satisfied"..
-    (when (let* ((*package* (find-package "KEYWORD"))
-                 (*read-suppress* nil)
-                 (not-p (char= next-char #\-))
-                 (feature (read stream)))
-            (if (feature-in-list-p feature *features*)
-		not-p
-		(not not-p)))
-      ;; Read (and discard) a form from input.
-      (let ((*read-suppress* t))
-	(read stream t nil t))))
- (values))
-
-(defvar *shebang-readtable*
-  (let ((readtable (copy-readtable nil)))
-    (set-dispatch-macro-character #\# #\!
-                                  (lambda (s c n) (shebang-reader s c n))
-                                  readtable)
-    ;; Cross-floats
-    (set-macro-character #\$ (lambda (stream char) (values)) nil readtable)
-    readtable))
-
 (defun sbcl-package-p (package)
   (let ((name (package-name package)))
     (eql (mismatch "SB-" name) 3)))
-
-(defun sbcl-source-file-p (filename)
-  (when filename
-    (loop for (nil pattern) in (logical-pathname-translations "SYS")
-          thereis (pathname-match-p filename pattern))))
-
-(defun guess-readtable-for-filename (filename)
-  (if (sbcl-source-file-p filename)
-      *shebang-readtable*
-      *readtable*))
-
-(defvar *debootstrap-packages* t)
 
 (defun call-with-debootstrapping (fun)
   (let ((*features* (append *features*
                             #+#.(swank/backend:with-symbol '+internal-features+ 'sb-impl)
                             sb-impl:+internal-features+)))
-    (handler-bind ((sb-int:bootstrap-package-not-found
-                     #'sb-int:debootstrap-package))
-      (funcall fun))))
+    (funcall fun)))
 
 (defmacro with-debootstrapping (&body body)
   `(call-with-debootstrapping (lambda () ,@body)))
 
 (defimplementation call-with-syntax-hooks (fn)
-  (cond ((and *debootstrap-packages*
-              (sbcl-package-p *package*))
+  (cond ((sbcl-package-p *package*)
          (with-debootstrapping (funcall fn)))
         (t
          (funcall fn))))
-
-(defimplementation default-readtable-alist ()
-  (let ((readtable *shebang-readtable*))
-    (loop for p in (remove-if-not #'sbcl-package-p (list-all-packages))
-          collect (cons (package-name p) readtable))))
-
 ;;; Packages
 
 #+#.(swank/backend:with-symbol 'package-local-nicknames 'sb-ext)
@@ -630,7 +556,7 @@ When Emacs presents the message it already has the source popped up
 and the source form highlighted. This makes much of the information in
 the error-context redundant."
   (let ((sb-int:*print-condition-references* nil))
-    (princ-to-string condition)))
+    (swank::safe-condition-message condition)))
 
 (defun compiler-error-context (error-context)
   "Describe a compiler error for Emacs including context information."
@@ -895,7 +821,7 @@ QUALITIES is an alist with (quality . value)"
 (defun file-form-number-position (definition-source)
   (let* ((code-date (sb-introspect:definition-source-file-write-date definition-source))
          (filename (sb-introspect:definition-source-pathname definition-source))
-         (*readtable* (guess-readtable-for-filename filename))
+         (*readtable* *readtable*)
          (source-code (get-source-code filename code-date)))
     (with-debootstrapping
       (with-input-from-string (s source-code)
@@ -908,10 +834,9 @@ QUALITIES is an alist with (quality . value)"
 
 (defun definition-source-buffer-location (definition-source)
   (with-definition-source (form-path character-offset plist) definition-source
-    (destructuring-bind (&key emacs-buffer emacs-position emacs-directory
-                              emacs-string &allow-other-keys)
+    (destructuring-bind (&key emacs-buffer emacs-position emacs-string &allow-other-keys)
         plist
-      (let ((*readtable* (guess-readtable-for-filename emacs-directory))
+      (let ((*readtable* *readtable*)
             start
             end)
         (with-debootstrapping
@@ -946,7 +871,8 @@ QUALITIES is an alist with (quality . value)"
                           (ignore-errors
                            (source-file-position namestring file-write-date
                                                  form-path))))
-                    character-offset))
+                    character-offset
+                    0))
            (snippet (source-hint-snippet namestring file-write-date pos)))
       (make-location `(:file ,namestring)
                      ;; /file positions/ in Common Lisp start from
@@ -989,7 +915,7 @@ QUALITIES is an alist with (quality . value)"
 
 (defun source-file-position (filename write-date form-path)
   (let ((source (get-source-code filename write-date))
-        (*readtable* (guess-readtable-for-filename filename)))
+        (*readtable* *readtable*))
     (with-debootstrapping
       (source-path-string-position form-path source))))
 
@@ -1350,7 +1276,7 @@ stack."
 (defun source-file-source-location (code-location)
   (let* ((code-date (code-location-debug-source-created code-location))
          (filename (code-location-debug-source-name code-location))
-         (*readtable* (guess-readtable-for-filename filename))
+         (*readtable* *readtable*)
          (source-code (get-source-code filename code-date)))
     (with-debootstrapping
       (with-input-from-string (s source-code)
@@ -1403,19 +1329,15 @@ stack."
     (code-location-source-location
      (sb-di:frame-code-location (nth-frame index)))))
 
-(defvar *keep-non-valid-locals* nil)
-
 (defun frame-debug-vars (frame)
   "Return a vector of debug-variables in frame."
   (let* ((all-vars (sb-di::debug-fun-debug-vars (sb-di:frame-debug-fun frame)))
          (loc (sb-di:frame-code-location frame))
-         (vars (if *keep-non-valid-locals*
-                   all-vars
-                   (remove-if (lambda (var)
-                                (ecase (sb-di:debug-var-validity var loc)
-                                  (:valid nil)
-                                  ((:invalid :unknown) t)))
-                              all-vars)))
+         (vars (remove-if (lambda (var)
+                            (ecase (sb-di:debug-var-validity var loc)
+                              (:valid nil)
+                              ((:invalid :unknown) t)))
+                          all-vars))
          more-context
          more-count)
     (values (when vars
@@ -1555,6 +1477,9 @@ stack."
     (let ((frame (nth-frame index)))
       (return-from-frame index (sb-debug::frame-call-as-list frame)))))
 
+(defimplementation frame-function (frame-number)
+  (sb-di:debug-fun-fun (sb-di:frame-debug-fun (nth-frame frame-number))))
+
 ;;;;; reference-conditions
 
 (defimplementation print-condition (condition stream)
@@ -1590,7 +1515,6 @@ stack."
 
 
 ;;;; Inspector
-
 (defmethod emacs-inspect ((o t))
   (cond ((sb-di::indirect-value-cell-p o)
          (label-value-line* (:value (sb-kernel:value-cell-ref o))))
@@ -1629,7 +1553,9 @@ stack."
   (append
    (label-value-line*
     ("Size" (sb-kernel:%code-code-size o))
-    ("Debug info" (sb-kernel:%code-debug-info o)))
+    ("Debug info" (sb-kernel:%code-debug-info o))
+    #+#.(swank/backend:with-symbol "%CODE-FIXUPS" "SB-VM")
+    ("Fixups" (sb-vm::%code-fixups o)))
    `("Entry points: " (:newline))
    (loop for i from 0 below (sb-vm::code-n-entries o)
          append (label-value-line i (sb-kernel:%code-entry-point o i)))
@@ -1802,11 +1728,12 @@ stack."
 
   (defun mailbox (thread)
     "Return THREAD's mailbox."
-    (sb-thread:with-mutex (*mailbox-lock*)
-      (or (find thread *mailboxes* :key #'mailbox.thread)
-          (let ((mb (make-mailbox :thread thread)))
-            (push mb *mailboxes*)
-            mb))))
+    (sb-sys:without-interrupts
+     (sb-thread:with-mutex (*mailbox-lock*)
+       (or (find thread *mailboxes* :key #'mailbox.thread)
+           (let ((mb (make-mailbox :thread thread)))
+             (push mb *mailboxes*)
+             mb)))))
 
   (defimplementation wake-thread (thread)
     #-darwin
@@ -1818,15 +1745,16 @@ stack."
     (signal-sem (mailbox.sem (mailbox thread))))
 
   (defimplementation send (thread message)
-    (let* ((mbox (mailbox thread))
-           (mutex (mailbox.mutex mbox)))
-      (sb-thread:with-mutex (mutex)
-        (setf (mailbox.queue mbox)
-              (nconc (mailbox.queue mbox) (list message)))
-        #-darwin
-        (sb-thread:condition-broadcast (mailbox.waitqueue mbox))
-        #+darwin
-        (signal-sem (mailbox.sem mbox)))))
+    (sb-sys:without-interrupts
+      (let* ((mbox (mailbox thread))
+             (mutex (mailbox.mutex mbox)))
+        (sb-thread:with-mutex (mutex)
+          (setf (mailbox.queue mbox)
+                (nconc (mailbox.queue mbox) (list message)))
+          #-darwin
+          (sb-thread:condition-broadcast (mailbox.waitqueue mbox))
+          #+darwin
+          (signal-sem (mailbox.sem mbox))))))
   
   (defimplementation receive-if (test &optional timeout)
     (let* ((mbox (mailbox (current-thread)))
@@ -1838,17 +1766,20 @@ stack."
       (assert (or (not timeout) (eq timeout t)))
       (loop
        (check-slime-interrupts)
-       (sb-thread:with-mutex (mutex)
-         (let* ((q (mailbox.queue mbox))
-                (tail (member-if test q)))
-           (when tail
-             (setf (mailbox.queue mbox) (nconc (ldiff q tail) (cdr tail)))
-             (return (car tail)))
-           (when (eq timeout t) (return (values nil t)))
-           #-darwin
+       (sb-thread:with-recursive-lock (mutex)
+         (sb-sys:without-interrupts
+           (let* ((q (mailbox.queue mbox))
+                  (tail (member-if test q)))
+             (when tail
+               (setf (mailbox.queue mbox) (nconc (ldiff q tail) (cdr tail)))
+               (return (car tail)))
+             (when (eq timeout t) (return (values nil t)))))
+         #-darwin
+         (let ((*slime-interrupts-enabled* t))
            (sb-thread:condition-wait waitq mutex)))
        #+darwin
-       (wait-sem sem))))
+       (let ((*slime-interrupts-enabled* t))
+         (wait-sem sem)))))
 
   (let ((alist '())
         (mutex (sb-thread:make-mutex :name "register-thread")))
@@ -2102,3 +2033,12 @@ stack."
 
 (defimplementation augment-features ()
   (append *features* #+sb-devel sb-impl:+internal-features+))
+
+(defimplementation structure-accessor-p (symbol)
+  #+#.(swank/backend:with-symbol 'structure-instance-accessor-p 'sb-kernel)
+  (sb-kernel:structure-instance-accessor-p symbol))
+
+#+#.(swank/backend:with-symbol '*interrupt-handler* 'sb-thread)
+(defimplementation call-with-interrupt-handler (interrupt-handler function)
+  (let ((sb-thread:*interrupt-handler* interrupt-handler))
+    (funcall function)))
